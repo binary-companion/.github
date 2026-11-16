@@ -26,10 +26,9 @@ def parse_tracking(text: str) -> list[str]:
     return list(projects)
 
 
-def projects_to_add(repo_projects: list[str], ancestor_project_sets: list[set[str]]) -> list[str]:
-    """Projects an issue should join: those its repo lists that no ancestor issue is already in."""
-    covered = set().union(*ancestor_project_sets) if ancestor_project_sets else set()
-    return [p for p in repo_projects if p not in covered]
+def projects_to_add(repo_projects: list[str], already_in: set[str]) -> list[str]:
+    """Projects an issue should join: those its repo lists that it is not already in."""
+    return [p for p in repo_projects if p not in already_in]
 
 
 def rollup_status(child_statuses: list[str | None], closed: list[bool] | None = None) -> str | None:
