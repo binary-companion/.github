@@ -1,0 +1,82 @@
+name: Tracking
+description: >
+  Applies the issue-tracking rules for the event that triggered the calling workflow: add to the repository's
+  projects, In review and Done for linked issues, parent roll-up, a bug when CI fails on the default branch,
+  and a sweep. The calling job runs in the `tracking` environment and passes the GitHub App credentials as
+  inputs (this action never reads the secrets context).
+inputs:
+  app-id:
+    description: GitHub App id (org variable APP_ID).
+    required: true
+  private-key:
+    description: GitHub App private key (org secret APP_PRIVATE_KEY).
+    required: true
+  tracking-file:
+    description: Path of the repository's tracking file, relative to its checkout.
+    default: .github/tracking.yml
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        path: caller
+        persist-credentials: false
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        repository: binary-companion/.github
+        ref: main
+        path: tracking
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: python -m pip install -r tracking/scripts/tracking/requirements-test.txt
+    - id: app
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: binary-companion
+    - name: Run the tracking command for this event
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+        EVENT: ${{ github.event_name }}
+        ACTION: ${{ github.event.action }}
+        REPO: ${{ github.repository }}
+        ISSUE: ${{ github.event.issue.number }}
+        PR: ${{ github.event.pull_request.number }}
+        MERGED: ${{ github.event.pull_request.merged }}
+        DRAFT: ${{ github.event.pull_request.draft }}
+        SHA: ${{ github.event.workflow_run.head_sha }}
+        RUN_URL: ${{ github.event.workflow_run.html_url }}
+        RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        TRACKING_FILE: ${{ inputs.tracking-file }}
+      run: |
+        set -euo pipefail
+        cli="python tracking/scripts/tracking/cli.py"
+        case "$EVENT" in
+          issues)
+            if [ "$ACTION" = opened ]; then
+              $cli add --repo "$REPO" --issue "$ISSUE" --tracking-file "caller/$TRACKING_FILE"
+            else
+              sleep 30   # let the built-in project workflows move the item first
+            fi
+            $cli rollup --repo "$REPO" --issue "$ISSUE" ;;
+          pull_request)
+            if [ "$ACTION" = closed ] && [ "$MERGED" = true ]; then
+              $cli pr --repo "$REPO" --pr "$PR" --target "done"
+            elif [ "$ACTION" != closed ] && [ "$DRAFT" != true ]; then
+              $cli pr --repo "$REPO" --pr "$PR" --target in_review
+            fi ;;
+          workflow_run)
+            if [ "$RUN_CONCLUSION" = failure ] && [ "$RUN_BRANCH" = "$DEFAULT_BRANCH" ]; then
+              prn=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty' || true)
+              $cli ci-bug --repo "$REPO" --sha "$SHA" --run-url "$RUN_URL" ${prn:+--pr "$prn"}
+            fi ;;
+          schedule|workflow_dispatch)
+            $cli sweep --repo "$REPO" ;;
+        esac
