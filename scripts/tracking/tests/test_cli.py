@@ -161,3 +161,36 @@ def test_sweep_rolls_up_every_open_issue_that_has_a_parent():
     api.open_with_parent = {"o/a": [2]}
     run_sweep(api, "o/a")
     assert api.status_writes == [("I_P_TT_1", "In progress")]
+
+
+def test_pr_check_passes_when_the_pr_closes_an_issue():
+    from cli import run_pr_check
+    api = FakeAPI([], closing={("o/a", 7): [("o/a", 1)]})
+    assert run_pr_check(api, "o/a", 7, "", "someone") == (True, "")
+
+
+def test_pr_check_passes_when_the_body_references_an_issue():
+    from cli import run_pr_check
+    api = FakeAPI([])
+    assert run_pr_check(api, "o/a", 7, "Part of #203", "someone")[0] is True
+    assert run_pr_check(api, "o/a", 7, "Part of binary-companion/timetug#203", "someone")[0] is True
+
+
+def test_pr_check_fails_without_any_issue_reference():
+    from cli import run_pr_check
+    api = FakeAPI([])
+    ok, message = run_pr_check(api, "o/a", 7, "Just some changes", "someone")
+    assert ok is False and "Fixes #" in message
+
+
+def test_pr_check_ignores_a_pr_number_inside_a_word_or_url_fragment():
+    from cli import run_pr_check
+    api = FakeAPI([])
+    assert run_pr_check(api, "o/a", 7, "see abc#12def and http://x/y#3", "someone")[0] is False
+
+
+def test_pr_check_exempts_bots():
+    from cli import run_pr_check
+    api = FakeAPI([])
+    assert run_pr_check(api, "o/a", 7, "", "dependabot[bot]")[0] is True
+    assert run_pr_check(api, "o/a", 7, "", "timetug-bot")[0] is True

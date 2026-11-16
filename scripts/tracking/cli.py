@@ -6,6 +6,7 @@ The run_* functions take the GitHub layer as `api` so tests can fake it. main() 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logic import DONE, IN_PROGRESS, IN_REVIEW, parse_tracking, projects_to_add, rollup_status  # noqa: E402
 
 PR_STATUS = {"in_review": IN_REVIEW, "done": DONE}
+BOT_AUTHORS = {"timetug-bot"}
+# "#12" or "owner/repo#12", not glued to a word or a URL fragment.
+ISSUE_REF = re.compile(r"(?<![\w/#&-])(?:[\w.-]+/[\w.-]+)?#\d+\b")
 
 
 def run_add(api, repo: str, number: int, tracking_text: str) -> None:
@@ -34,6 +38,19 @@ def run_pr(api, repo: str, pr_number: int, target: str) -> None:
         for item in issue.items:
             api.set_status(item, status)
         run_rollup(api, irepo, inum)
+
+
+def run_pr_check(api, repo: str, pr_number: int, body: str, author: str) -> tuple[bool, str]:
+    """A pull request must be attached to an issue: a closing reference, or at least an issue mention."""
+    if author.endswith("[bot]") or author in BOT_AUTHORS:
+        return True, ""
+    if api.closing_issues(repo, pr_number) or ISSUE_REF.search(body or ""):
+        return True, ""
+    return False, (
+        "This pull request is not attached to an issue. Add `Fixes #N` (or `Fixes owner/repo#N`) to the "
+        "description so the issue moves to Done on merge, or `Part of #N` when it only advances the issue. "
+        "File the issue first if there is none."
+    )
 
 
 def run_rollup(api, repo: str, number: int) -> None:
@@ -92,6 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--repo", required=True)
     s.add_argument("--pr", type=int, required=True)
     s.add_argument("--target", choices=sorted(PR_STATUS), required=True)
+    s = sub.add_parser("pr-check")
+    s.add_argument("--repo", required=True)
+    s.add_argument("--pr", type=int, required=True)
+    s.add_argument("--body", default="")
+    s.add_argument("--author", required=True)
     s = sub.add_parser("ci-bug")
     s.add_argument("--repo", required=True)
     s.add_argument("--sha", required=True)
@@ -106,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
         run_pr(api, a.repo, a.pr, a.target)
     elif a.cmd == "rollup":
         run_rollup(api, a.repo, a.issue)
+    elif a.cmd == "pr-check":
+        ok, message = run_pr_check(api, a.repo, a.pr, a.body, a.author)
+        if not ok:
+            print(f"::error::{message}")
+            return 1
     elif a.cmd == "sweep":
         run_sweep(api, a.repo)
     else:
