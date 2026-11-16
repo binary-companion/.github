@@ -25,20 +25,16 @@ def test_parse_tracking_empty_missing_key_or_malformed_means_untracked():
     assert parse_tracking("projects: [1, null]") == []
 
 
-def test_projects_to_add_without_ancestors_adds_all():
-    assert projects_to_add([TT], []) == [TT]
+def test_projects_to_add_adds_those_not_joined():
+    assert projects_to_add([TT, LIB], {TT}) == [LIB]
 
 
-def test_projects_to_add_skips_project_an_ancestor_is_in():
-    assert projects_to_add([TT], [{TT}]) == []
+def test_projects_to_add_nothing_when_already_in_all():
+    assert projects_to_add([TT], {TT, LIB}) == []
 
 
-def test_projects_to_add_adds_project_the_parent_is_not_in():
-    assert projects_to_add([LIB], [{TT}]) == [LIB]
-
-
-def test_projects_to_add_checks_every_ancestor_level():
-    assert projects_to_add([TT], [set(), {TT}]) == []
+def test_projects_to_add_empty_list_means_untracked():
+    assert projects_to_add([], set()) == []
 
 
 def test_rollup_no_children_is_no_change():
