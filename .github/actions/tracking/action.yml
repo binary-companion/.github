@@ -49,6 +49,8 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         MERGED: ${{ github.event.pull_request.merged }}
         DRAFT: ${{ github.event.pull_request.draft }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         SHA: ${{ github.event.workflow_run.head_sha }}
         RUN_URL: ${{ github.event.workflow_run.html_url }}
         RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
@@ -69,8 +71,12 @@ runs:
           pull_request)
             if [ "$ACTION" = closed ] && [ "$MERGED" = true ]; then
               $cli pr --repo "$REPO" --pr "$PR" --target "done"
-            elif [ "$ACTION" != closed ] && [ "$DRAFT" != true ]; then
-              $cli pr --repo "$REPO" --pr "$PR" --target in_review
+            elif [ "$ACTION" = opened ] || [ "$ACTION" = reopened ] || [ "$ACTION" = ready_for_review ]; then
+              if [ "$DRAFT" != true ]; then $cli pr --repo "$REPO" --pr "$PR" --target in_review; fi
+            fi
+            # Every open pull request must be attached to an issue (this step fails the job when it is not).
+            if [ "$ACTION" != closed ]; then
+              $cli pr-check --repo "$REPO" --pr "$PR" --body "$PR_BODY" --author "$PR_AUTHOR"
             fi ;;
           workflow_run)
             if [ "$RUN_CONCLUSION" = failure ] && [ "$RUN_BRANCH" = "$DEFAULT_BRANCH" ]; then
