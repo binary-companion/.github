@@ -1,0 +1,38 @@
+name: Phase sub-issue
+description: A phase or repo-specific slice of a larger issue (an agent or human can work it alone)
+labels: [enhancement]
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent issue
+      description: Link of the parent issue. Add this as a sub-issue of it after filing.
+      placeholder: "https://github.com/binary-companion/timetug/issues/123"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What this slice does and why, in plain words.
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan
+      description: The steps, files and commands this slice needs, or a link to the plan section.
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Success criteria
+      description: A checklist, for example "- [ ] tests pass".
+    validations:
+      required: true
+  - type: textarea
+    id: blocked
+    attributes:
+      label: Blocked by
+      description: Issues that must be done first (also add them as blockers on the issue).

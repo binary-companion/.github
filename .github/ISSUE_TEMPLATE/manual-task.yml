@@ -1,0 +1,30 @@
+name: Manual task
+description: Work only the owner can do. File in the private manual-configuration repository.
+labels: [manual]
+type: Manual Task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        File this only in the private `manual-configuration` repository. Never include a credential, token or key; give a file path or a place in the owner's password manager instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One line on what needs doing and the issue that needs it.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: Numbered, step-by-step instructions with exact values and direct URLs.
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Success criteria
+      description: A checklist the agent can verify.
+    validations:
+      required: true
