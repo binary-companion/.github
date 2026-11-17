@@ -53,3 +53,9 @@ def rollup_status(child_statuses: list[str | None], closed: list[bool] | None = 
     if all(s == IN_REVIEW for s in open_children):
         return IN_REVIEW
     return None
+
+
+def run_is_red(job_conclusions: list[str | None]) -> bool:
+    """A CI run is red only when a job failed or timed out. A job cancelled because a runner never started it
+    (or skipped) says nothing about the code, even though GitHub gives such a run the conclusion "failure"."""
+    return any(c in ("failure", "timed_out") for c in job_conclusions)

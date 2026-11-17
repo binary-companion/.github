@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from logic import parse_tracking, projects_to_add, rollup_status  # noqa: E402
+from logic import parse_tracking, projects_to_add, rollup_status, run_is_red  # noqa: E402
 
 TT = "binary-companion/timetug"
 LIB = "binary-companion/libraries"
@@ -72,3 +72,17 @@ def test_rollup_untracked_child_counts_by_issue_state():
 
 def test_rollup_archived_child_still_counts_as_done():
     assert rollup_status(["Done", "Done"]) == "Done"
+
+
+def test_a_run_with_a_failed_job_is_red():
+    assert run_is_red(["success", "failure", "cancelled"]) is True
+    assert run_is_red(["timed_out"]) is True
+
+
+def test_a_run_whose_jobs_only_passed_or_were_cancelled_or_skipped_is_not_red():
+    assert run_is_red(["success", "cancelled"]) is False
+    assert run_is_red(["cancelled", "skipped", None]) is False
+
+
+def test_a_run_with_no_jobs_is_not_red():
+    assert run_is_red([]) is False
