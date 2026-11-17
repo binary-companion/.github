@@ -234,3 +234,19 @@ def test_sweep_all_does_not_file_a_second_bug_for_the_same_commit():
                    bugs={("o/a", "abcdef1")}, issues=[])
     run_sweep_all(api)
     assert api.bugs == []
+
+
+def test_sweep_all_keeps_going_when_one_repository_fails_and_reports_it():
+    from cli import run_sweep_all
+
+    class Flaky(SweepAPI):
+        def scan(self, repo):
+            if repo == "o/bad":
+                raise RuntimeError("boom")
+            return super().scan(repo)
+
+    api = Flaky({"o/bad": "projects: [binary-companion/timetug]", "o/a": "projects: [binary-companion/timetug]"},
+                scans={"o/a": [(2, False, False)]}, issues=[issue("o/a", 2)])
+    failures = run_sweep_all(api)
+    assert api.added == [("P_TT", 2)]
+    assert [repo for repo, _ in failures] == ["o/bad"]
