@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cli import run_add, run_ci_bug, run_pr, run_rollup  # noqa: E402
+from cli import run_add, run_ci_bug, run_rollup  # noqa: E402
 from model import Issue, Item, Project  # noqa: E402
 
 TT = Project("P_TT", "binary-companion/timetug")
@@ -69,33 +69,6 @@ def test_add_untracked_repo_does_nothing():
     assert api.added == []
 
 
-def test_pr_in_review_sets_every_project_item_of_each_closed_issue():
-    i = issue("o/a", 1, items=[Item("a", TT.id, "In progress"), Item("b", LIB.id, "In progress")])
-    api = FakeAPI([i], closing={("o/a", 7): [("o/a", 1)]})
-    run_pr(api, "o/a", 7, "in_review")
-    assert sorted(api.status_writes) == [("a", "In review"), ("b", "In review")]
-
-
-def test_pr_merged_sets_done():
-    i = issue("o/a", 1, "In review")
-    api = FakeAPI([i], closing={("o/a", 7): [("o/a", 1)]})
-    run_pr(api, "o/a", 7, "done")
-    assert api.status_writes == [("I_P_TT_1", "Done")]
-
-
-def test_pr_without_closing_issues_is_a_no_op():
-    api = FakeAPI([])
-    run_pr(api, "o/a", 7, "done")
-    assert api.status_writes == []
-
-
-def test_pr_handles_several_issues():
-    api = FakeAPI([issue("o/a", 1, "In review"), issue("o/a", 2, "In review")],
-                  closing={("o/a", 7): [("o/a", 1), ("o/a", 2)]})
-    run_pr(api, "o/a", 7, "done")
-    assert [w[1] for w in api.status_writes] == ["Done", "Done"]
-
-
 def test_rollup_sets_parent_from_children_in_the_parents_project():
     parent = issue("o/a", 1, "Ready")
     c1 = issue("o/a", 2, "In progress", parent=("o/a", 1))
@@ -117,6 +90,14 @@ def test_rollup_reads_cross_repo_child_status_from_the_parents_project():
     api = FakeAPI([parent, child], children={("o/app", 1): [("o/lib", 2)]})
     run_rollup(api, "o/lib", 2)
     assert api.status_writes == [("I_P_TT_1", "In review")]
+
+
+def test_rollup_reads_a_child_that_is_only_in_its_own_projects():
+    parent = issue("o/app", 1, "Ready")
+    child = issue("o/lib", 2, parent=("o/app", 1), items=[Item("c1", LIB.id, "Done")])
+    api = FakeAPI([parent, child], children={("o/app", 1): [("o/lib", 2)]})
+    run_rollup(api, "o/lib", 2)
+    assert api.status_writes == [("I_P_TT_1", "Done")]
 
 
 def test_rollup_reopened_child_pulls_parent_out_of_done():
@@ -153,44 +134,103 @@ def test_ci_bug_files_a_bug_that_references_the_merge():
     assert "#12" in body and "https://example/run/1" in body
 
 
-def test_sweep_rolls_up_every_open_issue_that_has_a_parent():
-    from cli import run_sweep
-    parent = issue("o/a", 1, "Ready")
-    c = issue("o/a", 2, "In progress", parent=("o/a", 1))
-    api = FakeAPI([parent, c], children={("o/a", 1): [("o/a", 2)]})
-    api.open_with_parent = {"o/a": [2]}
-    run_sweep(api, "o/a")
-    assert api.status_writes == [("I_P_TT_1", "In progress")]
-
-
 def test_pr_check_passes_when_the_pr_closes_an_issue():
     from cli import run_pr_check
     api = FakeAPI([], closing={("o/a", 7): [("o/a", 1)]})
-    assert run_pr_check(api, "o/a", 7, "", "someone") == (True, "")
+    assert run_pr_check(api, "o/a", 7, "Fixes #1", "someone") == (True, "")
 
 
-def test_pr_check_passes_when_the_body_references_an_issue():
+def test_pr_check_passes_when_the_pr_mentions_no_issue():
+    """A pull request that is not part of a story needs no issue."""
     from cli import run_pr_check
     api = FakeAPI([])
-    assert run_pr_check(api, "o/a", 7, "Part of #203", "someone")[0] is True
-    assert run_pr_check(api, "o/a", 7, "Part of binary-companion/timetug#203", "someone")[0] is True
+    assert run_pr_check(api, "o/a", 7, "Fix a typo", "someone") == (True, "")
 
 
-def test_pr_check_fails_without_any_issue_reference():
+def test_pr_check_fails_when_it_mentions_an_issue_without_a_closing_link():
     from cli import run_pr_check
     api = FakeAPI([])
-    ok, message = run_pr_check(api, "o/a", 7, "Just some changes", "someone")
-    assert ok is False and "Fixes #" in message
+    for body in ("Part of #203", "Part of binary-companion/timetug#203", "Related to #5"):
+        ok, message = run_pr_check(api, "o/a", 7, body, "someone")
+        assert ok is False and "Fixes #" in message and "sub-issue" in message
 
 
 def test_pr_check_ignores_a_pr_number_inside_a_word_or_url_fragment():
     from cli import run_pr_check
     api = FakeAPI([])
-    assert run_pr_check(api, "o/a", 7, "see abc#12def and http://x/y#3", "someone")[0] is False
+    assert run_pr_check(api, "o/a", 7, "see abc#12def and http://x/y#3", "someone")[0] is True
 
 
 def test_pr_check_exempts_bots():
     from cli import run_pr_check
     api = FakeAPI([])
-    assert run_pr_check(api, "o/a", 7, "", "dependabot[bot]")[0] is True
-    assert run_pr_check(api, "o/a", 7, "", "timetug-bot")[0] is True
+    assert run_pr_check(api, "o/a", 7, "Part of #5", "dependabot[bot]")[0] is True
+    assert run_pr_check(api, "o/a", 7, "Part of #5", "timetug-bot")[0] is True
+
+
+class SweepAPI(FakeAPI):
+    """A fake with the extra discovery calls the whole-organization sweep needs."""
+
+    def __init__(self, repos, scans=None, open_prs=None, merged_prs=None, failures=None, bugs=(), **kw):
+        super().__init__(**kw)
+        self.repos = repos
+        self.scans = scans or {}
+        self._open_prs = open_prs or {}
+        self._merged_prs = merged_prs or {}
+        self.failures = failures or {}
+        self.bugs_seen = set(bugs)
+
+    def tracked_repos(self):
+        return self.repos
+
+    def scan(self, repo):
+        return self.scans.get(repo, [])
+
+    def open_prs(self, repo):
+        return self._open_prs.get(repo, [])
+
+    def merged_prs(self, repo):
+        return self._merged_prs.get(repo, [])
+
+    def latest_failure(self, repo):
+        return self.failures.get(repo)
+
+    def bug_exists(self, repo, sha):
+        return (repo, sha[:7]) in self.bugs_seen
+
+
+def test_sweep_all_skips_repos_without_a_tracking_list():
+    from cli import run_sweep_all
+    api = SweepAPI({"o/web": "", "o/a": "projects: [binary-companion/timetug]"},
+                   scans={"o/web": [(1, False, False)], "o/a": [(2, False, False)]},
+                   issues=[issue("o/web", 1), issue("o/a", 2)])
+    run_sweep_all(api)
+    assert api.added == [("P_TT", 2)]
+
+
+def test_sweep_all_rolls_up_parents_of_scanned_issues():
+    from cli import run_sweep_all
+    parent = issue("o/a", 1, "Ready")
+    child = issue("o/a", 2, "In progress", parent=("o/a", 1))
+    api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
+                   scans={"o/a": [(2, False, True)]}, children={("o/a", 1): [("o/a", 2)]},
+                   issues=[parent, child])
+    run_sweep_all(api)
+    assert ("I_P_TT_1", "In progress") in api.status_writes
+
+
+def test_sweep_all_files_one_bug_for_a_failed_default_branch_run():
+    from cli import run_sweep_all
+    api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
+                   failures={"o/a": ("abcdef1234567", "https://example/run/9", 12)}, issues=[])
+    run_sweep_all(api)
+    assert len(api.bugs) == 1 and "abcdef1" in api.bugs[0][1]
+
+
+def test_sweep_all_does_not_file_a_second_bug_for_the_same_commit():
+    from cli import run_sweep_all
+    api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
+                   failures={"o/a": ("abcdef1234567", "https://example/run/9", None)},
+                   bugs={("o/a", "abcdef1")}, issues=[])
+    run_sweep_all(api)
+    assert api.bugs == []

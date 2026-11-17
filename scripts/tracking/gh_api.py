@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 from model import Issue, Item, Project
@@ -35,7 +36,8 @@ def _issue(node: dict) -> Issue:
 
 
 class GH:
-    def __init__(self) -> None:
+    def __init__(self, org: str | None = None) -> None:
+        self.org = org or os.environ.get("GITHUB_REPOSITORY_OWNER", "binary-companion")
         self._projects: dict[str, Project] = {}
         self._status: dict[str, tuple[str, dict[str, str]]] = {}
 
@@ -87,12 +89,56 @@ class GH:
         nodes = _gql(q, o=o, r=r, n=pr)["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
         return [(n["repository"]["nameWithOwner"], n["number"]) for n in nodes]
 
-    def open_children(self, repo: str) -> list[int]:
+    def tracked_repos(self) -> dict[str, str]:
+        """{owner/name: text of .github/tracking.yml ("" when absent)} for every active org repository."""
+        q = """query($o:String!,$after:String){organization(login:$o){repositories(first:100,isArchived:false,after:$after){
+          pageInfo{hasNextPage endCursor} nodes{nameWithOwner object(expression:"HEAD:.github/tracking.yml"){... on Blob{text}}}}}}"""
+        out: dict[str, str] = {}
+        after = ""
+        while True:
+            vars_ = {"o": self.org, **({"after": after} if after else {})}
+            page = _gql(q, **vars_)["organization"]["repositories"]
+            for n in page["nodes"]:
+                out[n["nameWithOwner"]] = (n["object"] or {}).get("text", "")
+            if not page["pageInfo"]["hasNextPage"]:
+                return out
+            after = page["pageInfo"]["endCursor"]
+
+    def scan(self, repo: str) -> list[tuple[int, bool, bool]]:
+        """Recently updated issues of a repository: (number, closed, has a parent)."""
         o, r = repo.split("/")
-        q = """query($o:String!,$r:String!){repository(owner:$o,name:$r){issues(states:OPEN,first:100){
-          nodes{number parent{number}}}}}"""
+        q = """query($o:String!,$r:String!){repository(owner:$o,name:$r){issues(first:50,
+          orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number closed parent{number}}}}}"""
         nodes = _gql(q, o=o, r=r)["repository"]["issues"]["nodes"]
-        return [n["number"] for n in nodes if n["parent"]]
+        return [(n["number"], n["closed"], n["parent"] is not None) for n in nodes]
+
+    def latest_failure(self, repo: str) -> tuple[str, str, int | None] | None:
+        """When the latest completed CI run on the default branch failed: (first failing commit of the red
+        streak, URL of the latest failing run, pull request of the first failing commit). None when it is green."""
+        branch = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+        runs = json.loads(subprocess.run(
+            ["gh", "api", f"repos/{repo}/actions/runs?branch={branch}&event=push&status=completed&per_page=30"],
+            check=True, capture_output=True, text=True).stdout)["workflow_runs"]
+        ci = [r for r in runs if r["name"] == "CI"]
+        streak = []
+        for r in ci:
+            if r["conclusion"] != "failure":
+                break
+            streak.append(r)
+        if not streak:
+            return None
+        first = streak[-1]
+        pulls = subprocess.run(["gh", "api", f"repos/{repo}/commits/{first['head_sha']}/pulls", "--jq", ".[0].number // empty"],
+                               check=False, capture_output=True, text=True).stdout.strip()
+        return first["head_sha"], streak[0]["html_url"], int(pulls) if pulls else None
+
+    def bug_exists(self, repo: str, sha: str) -> bool:
+        """Any issue (open or closed) in the repository already mentions the commit."""
+        q = f"repo:{repo} {sha[:7]} in:title,body type:issue"
+        out = subprocess.run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q={q}", "--jq", ".total_count"],
+                             check=True, capture_output=True, text=True).stdout.strip()
+        return int(out or 0) > 0
 
     def create_bug(self, repo: str, title: str, body: str) -> int:
         url = subprocess.run(["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body,

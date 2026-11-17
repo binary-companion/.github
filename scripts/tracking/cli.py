@@ -1,4 +1,4 @@
-"""Tracking commands: add to projects, PR status moves, parent roll-up, failed-CI bug.
+"""Tracking commands: the organization sweep (add to projects, parent roll-up, failed-CI bug) and the PR issue check.
 
 The run_* functions take the GitHub layer as `api` so tests can fake it. main() wires the real one.
 """
@@ -12,9 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from logic import DONE, IN_PROGRESS, IN_REVIEW, parse_tracking, projects_to_add, rollup_status  # noqa: E402
+from logic import DONE, IN_PROGRESS, parse_tracking, projects_to_add, rollup_status  # noqa: E402
 
-PR_STATUS = {"in_review": IN_REVIEW, "done": DONE}
 BOT_AUTHORS = {"timetug-bot"}
 # "#12" or "owner/repo#12", not glued to a word or a URL fragment.
 ISSUE_REF = re.compile(r"(?<![\w/#&-])(?:[\w.-]+/[\w.-]+)?#\d+\b")
@@ -31,25 +30,21 @@ def run_add(api, repo: str, number: int, tracking_text: str) -> None:
         api.add_to_project(api.resolve_project(ref), issue)
 
 
-def run_pr(api, repo: str, pr_number: int, target: str) -> None:
-    status = PR_STATUS[target]
-    for irepo, inum in api.closing_issues(repo, pr_number):
-        issue = api.issue(irepo, inum)
-        for item in issue.items:
-            api.set_status(item, status)
-        run_rollup(api, irepo, inum)
-
-
 def run_pr_check(api, repo: str, pr_number: int, body: str, author: str) -> tuple[bool, str]:
-    """A pull request must be attached to an issue: a closing reference, or at least an issue mention."""
+    """A pull request that is part of a story must be linked to it. One that mentions no issue is fine.
+
+    GitHub links a pull request to an issue only through a closing keyword (Fixes, Closes, Resolves);
+    "Part of #N" is just a mention and does not show the pull request on the issue.
+    """
     if author.endswith("[bot]") or author in BOT_AUTHORS:
         return True, ""
-    if api.closing_issues(repo, pr_number) or ISSUE_REF.search(body or ""):
+    if api.closing_issues(repo, pr_number) or not ISSUE_REF.search(body or ""):
         return True, ""
     return False, (
-        "This pull request is not attached to an issue. Add `Fixes #N` (or `Fixes owner/repo#N`) to the "
-        "description so the issue moves to Done on merge, or `Part of #N` when it only advances the issue. "
-        "File the issue first if there is none."
+        "This pull request mentions an issue but is not linked to it, so it will not show on the issue. "
+        "GitHub links only with a closing keyword: use `Fixes #N` (another repository: `Fixes owner/repo#N`). "
+        "If the issue is bigger than this pull request, file a sub-issue for this pull request in this "
+        "repository and use `Fixes` on that one."
     )
 
 
@@ -63,7 +58,7 @@ def run_rollup(api, repo: str, number: int) -> None:
         for item in parent.items:
             statuses = []
             for kid in kids:
-                mine = kid.item_in(item.project_id)
+                mine = kid.item_in(item.project_id) or next((i for i in kid.items if i.status), None)
                 statuses.append(updated.get((kid.repo, kid.number, item.project_id)) or (mine.status if mine else None))
             new = rollup_status(statuses, [k.closed for k in kids])
             if new is None and item.status == DONE and any(s != DONE for s in statuses):
@@ -74,10 +69,21 @@ def run_rollup(api, repo: str, number: int) -> None:
         cur = parent
 
 
-def run_sweep(api, repo: str) -> None:
-    """Safety net for hand-set statuses, which fire no event: roll up from every open child in the repo."""
-    for number in api.open_children(repo):
-        run_rollup(api, repo, number)
+def run_sweep_all(api) -> None:
+    """Every tracked repository: add open issues to its projects, roll parents up, file a CI bug."""
+    for repo, tracking_text in api.tracked_repos().items():
+        if not parse_tracking(tracking_text):
+            continue
+        for number, closed, has_parent in api.scan(repo):
+            if not closed:
+                run_add(api, repo, number, tracking_text)
+            if has_parent:
+                run_rollup(api, repo, number)
+        failure = api.latest_failure(repo)
+        if failure:
+            sha, run_url, pr_number = failure
+            if not api.bug_exists(repo, sha):
+                run_ci_bug(api, repo, sha, run_url, pr_number)
 
 
 def run_ci_bug(api, repo: str, sha: str, run_url: str, pr_number: int | None) -> int:
@@ -97,46 +103,21 @@ def main(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("add", "rollup"):
-        s = sub.add_parser(name)
-        s.add_argument("--repo", required=True)
-        s.add_argument("--issue", type=int, required=True)
-        if name == "add":
-            s.add_argument("--tracking-file", required=True)
-    s = sub.add_parser("sweep")
-    s.add_argument("--repo", required=True)
-    s = sub.add_parser("pr")
-    s.add_argument("--repo", required=True)
-    s.add_argument("--pr", type=int, required=True)
-    s.add_argument("--target", choices=sorted(PR_STATUS), required=True)
+    sub.add_parser("sweep-all")
     s = sub.add_parser("pr-check")
     s.add_argument("--repo", required=True)
     s.add_argument("--pr", type=int, required=True)
     s.add_argument("--body", default="")
     s.add_argument("--author", required=True)
-    s = sub.add_parser("ci-bug")
-    s.add_argument("--repo", required=True)
-    s.add_argument("--sha", required=True)
-    s.add_argument("--run-url", required=True)
-    s.add_argument("--pr", type=int)
     a = p.parse_args(argv)
     api = GH()
-    if a.cmd == "add":
-        path = Path(a.tracking_file)
-        run_add(api, a.repo, a.issue, path.read_text() if path.exists() else "")
-    elif a.cmd == "pr":
-        run_pr(api, a.repo, a.pr, a.target)
-    elif a.cmd == "rollup":
-        run_rollup(api, a.repo, a.issue)
-    elif a.cmd == "pr-check":
+    if a.cmd == "pr-check":
         ok, message = run_pr_check(api, a.repo, a.pr, a.body, a.author)
         if not ok:
             print(f"::error::{message}")
             return 1
-    elif a.cmd == "sweep":
-        run_sweep(api, a.repo)
     else:
-        run_ci_bug(api, a.repo, a.sha, a.run_url, a.pr)
+        run_sweep_all(api)
     return 0
 
 
