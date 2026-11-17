@@ -7,6 +7,7 @@ import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+from logic import run_is_red
 from model import Issue, Item, Project
 
 _ITEMS = """projectItems(first: 20) { nodes { id project { id }
@@ -162,6 +163,8 @@ class GH:
         ci = [r for r in runs if r["name"] == "CI"]
         streak = []
         for r in ci:
+            if r["conclusion"] == "cancelled" or (r["conclusion"] == "failure" and not self._run_red(repo, r["id"])):
+                continue  # a cancelled run (or one whose jobs only never started) is neither red nor green
             if r["conclusion"] != "failure":
                 break
             streak.append(r)
@@ -171,6 +174,11 @@ class GH:
         pulls = subprocess.run(["gh", "api", f"repos/{repo}/commits/{first['head_sha']}/pulls", "--jq", ".[0].number // empty"],
                                check=False, capture_output=True, text=True).stdout.strip()
         return first["head_sha"], streak[0]["html_url"], int(pulls) if pulls else None
+
+    def _run_red(self, repo: str, run_id: int) -> bool:
+        raw = subprocess.run(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                              "--jq", "[.jobs[].conclusion]"], check=True, capture_output=True, text=True).stdout
+        return run_is_red(json.loads(raw))
 
     def bug_exists(self, repo: str, sha: str) -> bool:
         """Any issue (open or closed) in the repository already mentions the commit."""
