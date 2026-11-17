@@ -12,22 +12,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from logic import DONE, IN_PROGRESS, parse_tracking, projects_to_add, rollup_status  # noqa: E402
+from logic import DONE, IN_PROGRESS, IN_REVIEW, READY, parse_tracking, projects_to_add, rollup_status  # noqa: E402
 
 BOT_AUTHORS = {"timetug-bot"}
 # "#12" or "owner/repo#12", not glued to a word or a URL fragment.
 ISSUE_REF = re.compile(r"(?<![\w/#&-])(?:[\w.-]+/[\w.-]+)?#\d+\b")
 
 
-def run_add(api, repo: str, number: int, tracking_text: str) -> None:
+def run_add(api, repo: str, number: int, tracking_text: str, done: bool = False):
+    """Put the issue on every project its repository lists. `done` (a recently completed issue the sweep
+    never saw open) sets Done on the items it creates. Returns the issue, or None when the repo is untracked."""
     refs = parse_tracking(tracking_text)
     if not refs:
-        return
+        return None
     issue = api.issue(repo, number)
     joined = {i.project_id for i in issue.items}
     already = {r for r in refs if api.resolve_project(r).id in joined}
     for ref in projects_to_add(refs, already):
-        api.add_to_project(api.resolve_project(ref), issue)
+        item = api.add_to_project(api.resolve_project(ref), issue)
+        if done:
+            api.set_status(item, DONE)
+    return issue
 
 
 def run_pr_check(api, repo: str, pr_number: int, body: str, author: str) -> tuple[bool, str]:
@@ -49,28 +54,39 @@ def run_pr_check(api, repo: str, pr_number: int, body: str, author: str) -> tupl
 
 
 def run_rollup(api, repo: str, number: int) -> None:
-    """Set each ancestor's status from its children, walking up. Parent status is derived, never hand-set."""
+    """Set each ancestor's status from its children, walking up, and close or reopen it to match.
+    Parent status is derived, never hand-set."""
     updated: dict[tuple[str, int, str], str] = {}
+    closed_now: dict[tuple[str, int], bool] = {}
     cur = api.issue(repo, number)
     while cur.parent:
         parent = api.issue(*cur.parent)
         kids = api.sub_issues(parent.repo, parent.number)
+        kid_closed = [closed_now.get((k.repo, k.number), k.closed) for k in kids]
         for item in parent.items:
             statuses = []
             for kid in kids:
                 mine = kid.item_in(item.project_id) or next((i for i in kid.items if i.status), None)
                 statuses.append(updated.get((kid.repo, kid.number, item.project_id)) or (mine.status if mine else None))
-            new = rollup_status(statuses, [k.closed for k in kids])
-            if new is None and item.status == DONE and any(s != DONE for s in statuses):
-                new = IN_PROGRESS  # a child was reopened
+            new = rollup_status(statuses, kid_closed)
+            if new is None and item.status in (DONE, IN_REVIEW):
+                new = IN_PROGRESS  # a child is open and not in review: the parent cannot be Done or In review
             if new and new != item.status:
                 api.set_status(item, new)
                 updated[(parent.repo, parent.number, item.project_id)] = new
+        all_closed = bool(kids) and all(kid_closed)
+        if all_closed and not parent.closed:
+            api.close_issue(parent)
+            closed_now[(parent.repo, parent.number)] = True
+        elif not all_closed and parent.closed:
+            api.reopen_issue(parent)
+            closed_now[(parent.repo, parent.number)] = False
         cur = parent
 
 
 def run_sweep_all(api) -> list[tuple[str, Exception]]:
-    """Every tracked repository: add open issues to its projects, roll parents up, file a CI bug.
+    """Every tracked repository: add issues to its projects (a recently completed one as Done), roll parents
+    up, file a CI bug.
 
     One repository failing does not stop the others; the failures are returned for the caller to report.
     """
@@ -79,22 +95,25 @@ def run_sweep_all(api) -> list[tuple[str, Exception]]:
         if not parse_tracking(tracking_text):
             continue
         try:
-            for number, closed, has_parent in api.scan(repo):
+            for number, closed, has_parent, recent_done in api.scan(repo):
                 if not closed:
                     run_add(api, repo, number, tracking_text)
+                elif recent_done:
+                    run_add(api, repo, number, tracking_text, done=True)
                 if has_parent:
                     run_rollup(api, repo, number)
             failure = api.latest_failure(repo)
             if failure:
                 sha, run_url, pr_number = failure
                 if not api.bug_exists(repo, sha):
-                    run_ci_bug(api, repo, sha, run_url, pr_number)
+                    run_ci_bug(api, repo, sha, run_url, pr_number, tracking_text)
         except Exception as error:  # noqa: BLE001 - isolate each repository
             failures.append((repo, error))
     return failures
 
 
-def run_ci_bug(api, repo: str, sha: str, run_url: str, pr_number: int | None) -> int:
+def run_ci_bug(api, repo: str, sha: str, run_url: str, pr_number: int | None, tracking_text: str = "") -> int:
+    """File the bug for a red default branch: on the board, Ready, Priority Urgent."""
     ref = f" (merged in #{pr_number})" if pr_number else ""
     title = f"CI failed on master after {sha[:7]}"
     body = (
@@ -103,7 +122,12 @@ def run_ci_bug(api, repo: str, sha: str, run_url: str, pr_number: int | None) ->
         "## Success criteria\n- [ ] The cause is found and fixed\n- [ ] CI is green on the default branch\n\n"
         "Filed automatically. The issue that caused it stays Done; track the fix here."
     )
-    return api.create_bug(repo, title, body)
+    number = api.create_bug(repo, title, body)
+    api.set_issue_field(repo, number, "Priority", "Urgent")
+    issue = run_add(api, repo, number, tracking_text)
+    for item in (issue.items if issue else []):
+        api.set_status(item, READY)
+    return number
 
 
 def main(argv: list[str] | None = None) -> int:

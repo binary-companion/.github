@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 
 from model import Issue, Item, Project
 
@@ -104,13 +105,38 @@ class GH:
                 return out
             after = page["pageInfo"]["endCursor"]
 
-    def scan(self, repo: str) -> list[tuple[int, bool, bool]]:
-        """Recently updated issues of a repository: (number, closed, has a parent)."""
+    def scan(self, repo: str) -> list[tuple[int, bool, bool, bool]]:
+        """Recently updated issues of a repository: (number, closed, has a parent, completed within the last 7
+        days). The last flag marks closed issues a sweep may still have to put on the board as Done."""
         o, r = repo.split("/")
         q = """query($o:String!,$r:String!){repository(owner:$o,name:$r){issues(first:50,
-          orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number closed parent{number}}}}}"""
+          orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number closed closedAt stateReason parent{number}}}}}"""
         nodes = _gql(q, o=o, r=r)["repository"]["issues"]["nodes"]
-        return [(n["number"], n["closed"], n["parent"] is not None) for n in nodes]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        return [(n["number"], n["closed"], n["parent"] is not None,
+                 bool(n["closed"] and n["stateReason"] == "COMPLETED" and n["closedAt"]
+                      and datetime.fromisoformat(n["closedAt"].replace("Z", "+00:00")) >= cutoff))
+                for n in nodes]
+
+    def close_issue(self, issue: Issue) -> None:
+        subprocess.run(["gh", "api", "-X", "PATCH", f"repos/{issue.repo}/issues/{issue.number}",
+                        "-f", "state=closed", "-f", "state_reason=completed"], check=True, capture_output=True)
+        issue.closed = True
+
+    def reopen_issue(self, issue: Issue) -> None:
+        subprocess.run(["gh", "api", "-X", "PATCH", f"repos/{issue.repo}/issues/{issue.number}",
+                        "-f", "state=open"], check=True, capture_output=True)
+        issue.closed = False
+
+    def set_issue_field(self, repo: str, number: int, field: str, value: str) -> None:
+        """Set an organization issue field (single select) by its name and option name."""
+        if not hasattr(self, "_issue_fields"):
+            raw = subprocess.run(["gh", "api", f"orgs/{self.org}/issue-fields"],
+                                 check=True, capture_output=True, text=True).stdout
+            self._issue_fields = {f["name"]: f["id"] for f in json.loads(raw)}
+        payload = json.dumps({"issue_field_values": [{"field_id": self._issue_fields[field], "value": value}]})
+        subprocess.run(["gh", "api", "-X", "POST", f"repos/{repo}/issues/{number}/issue-field-values",
+                        "--input", "-"], input=payload, check=True, capture_output=True, text=True)
 
     def latest_failure(self, repo: str) -> tuple[str, str, int | None] | None:
         """When the latest completed CI run on the default branch failed: (first failing commit of the red

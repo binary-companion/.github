@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import yaml
 
+READY = "Ready"
 IN_PROGRESS = "In progress"
 IN_REVIEW = "In review"
 DONE = "Done"
