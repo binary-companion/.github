@@ -90,6 +90,13 @@ class GH:
         nodes = _gql(q, o=o, r=r, n=pr)["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
         return [(n["repository"]["nameWithOwner"], n["number"]) for n in nodes]
 
+    def tracking_text(self, repo: str) -> str:
+        """Text of the repository's .github/tracking.yml, or "" when it has none."""
+        done = subprocess.run(["gh", "api", f"repos/{repo}/contents/.github/tracking.yml",
+                               "-H", "Accept: application/vnd.github.raw+json"],
+                              check=False, capture_output=True, text=True)
+        return done.stdout if done.returncode == 0 else ""
+
     def tracked_repos(self) -> dict[str, str]:
         """{owner/name: text of .github/tracking.yml ("" when absent)} for every active org repository."""
         q = """query($o:String!,$after:String){organization(login:$o){repositories(first:100,isArchived:false,after:$after){

@@ -19,6 +19,7 @@ class FakeAPI:
         self.added = []
         self.status_writes = []
         self.bugs = []
+        self.tracking = {}
         self.closed_issues = []
         self.reopened_issues = []
         self.fields = []
@@ -53,6 +54,9 @@ class FakeAPI:
         self.bugs.append((repo, title, body))
         self.issues[(repo, 99)] = Issue("N99", repo, 99)
         return 99
+
+    def tracking_text(self, repo):
+        return self.tracking.get(repo, "projects: [binary-companion/timetug]")
 
     def close_issue(self, issue):
         self.closed_issues.append(issue.number)
@@ -337,3 +341,58 @@ def test_sweep_all_passes_the_repo_tracking_list_to_the_bug_filing():
                    failures={"o/a": ("abcdef1234567", "https://example/run/9", None)}, issues=[])
     run_sweep_all(api)
     assert api.status_writes == [("I_P_TT_99", "Ready")]
+
+
+def test_issue_event_opened_adds_the_issue_to_the_repo_projects():
+    from cli import run_issue_event
+    api = FakeAPI([issue("o/a", 1)])
+    run_issue_event(api, "o/a", 1, "opened", "")
+    assert api.added == [("P_TT", 1)]
+    assert api.status_writes == []
+
+
+def test_issue_event_closed_completed_adds_a_missing_issue_as_done_and_rolls_up():
+    from cli import run_issue_event
+    parent = issue("o/a", 1, "In progress")
+    child = issue("o/a", 2, closed=True, parent=("o/a", 1))
+    api = FakeAPI([parent, child], children={("o/a", 1): [("o/a", 2)]})
+    run_issue_event(api, "o/a", 2, "closed", "completed")
+    assert api.added == [("P_TT", 2)]
+    assert ("I_P_TT_2", "Done") in api.status_writes
+    assert api.closed_issues == [1]
+
+
+def test_issue_event_closed_sets_an_existing_item_done_before_rolling_up():
+    from cli import run_issue_event
+    parent = issue("o/a", 1, "In progress")
+    child = issue("o/a", 2, "In progress", closed=True, parent=("o/a", 1))
+    api = FakeAPI([parent, child], children={("o/a", 1): [("o/a", 2)]})
+    run_issue_event(api, "o/a", 2, "closed", "completed")
+    assert api.status_writes[0] == ("I_P_TT_2", "Done")
+    assert ("I_P_TT_1", "Done") in api.status_writes
+
+
+def test_issue_event_closed_not_planned_does_not_add_a_missing_issue():
+    from cli import run_issue_event
+    api = FakeAPI([issue("o/a", 1, closed=True)])
+    run_issue_event(api, "o/a", 1, "closed", "not_planned")
+    assert api.added == []
+    assert api.status_writes == []
+
+
+def test_issue_event_reopened_pulls_done_back_and_reopens_the_parent():
+    from cli import run_issue_event
+    parent = issue("o/a", 1, "Done", closed=True)
+    child = issue("o/a", 2, "Done", parent=("o/a", 1))
+    api = FakeAPI([parent, child], children={("o/a", 1): [("o/a", 2)]})
+    run_issue_event(api, "o/a", 2, "reopened", "")
+    assert ("I_P_TT_2", "In progress") in api.status_writes
+    assert api.reopened_issues == [1]
+
+
+def test_issue_event_in_an_untracked_repository_does_nothing():
+    from cli import run_issue_event
+    api = FakeAPI([issue("o/web", 1)])
+    api.tracking["o/web"] = ""
+    run_issue_event(api, "o/web", 1, "opened", "")
+    assert api.added == [] and api.status_writes == []

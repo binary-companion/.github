@@ -1,0 +1,21 @@
+# Copy to .github/workflows/track.yml in a tracked repository (with .github/tracking.yml). It runs only on issue
+# events, which run from the default branch, and reads the App key from the `tracking` environment, which is limited
+# to the default branch, so pull-request code never meets the key. Pin the action to a commit of
+# binary-companion/.github (`gh api repos/binary-companion/.github/commits/main --jq .sha`).
+# A private repository on the free plan has no environments: drop the `environment` line and keep the key as a
+# repository secret.
+name: Track issue
+on:
+  issues:
+    types: [opened, closed, reopened]
+permissions:
+  contents: read
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    environment: tracking
+    steps:
+      - uses: binary-companion/.github/.github/actions/track@PIN # main
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}

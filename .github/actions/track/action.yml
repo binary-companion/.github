@@ -1,0 +1,39 @@
+name: Track issue
+description: >
+  Keeps the project board right the moment an issue is opened, closed or reopened: adds the issue to its repository's
+  projects (a completed one as Done), sets its own status, and brings every ancestor up to date. The caller job runs
+  in the `tracking` environment (default branch only), which holds the GitHub App key; pull-request code never runs
+  it because the caller triggers only on `issues` events. The scripts come from the same commit as this action
+  (github.action_path), so the pin in the caller pins the code too.
+inputs:
+  app-id:
+    description: The tracking GitHub App's id (the APP_ID variable).
+    required: true
+  private-key:
+    description: The tracking GitHub App's private key (the APP_PRIVATE_KEY secret).
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: app
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: binary-companion
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: "3.12"
+    - shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: python -m pip install -r "$ACTION_PATH/../../../scripts/tracking/requirements-test.txt"
+    - shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+        REPO: ${{ github.repository }}
+        NUMBER: ${{ github.event.issue.number }}
+        ACTION: ${{ github.event.action }}
+        REASON: ${{ github.event.issue.state_reason }}
+      run: python "$ACTION_PATH/../../../scripts/tracking/cli.py" issue-event --repo "$REPO" --number "$NUMBER" --action "$ACTION" --reason "$REASON"
