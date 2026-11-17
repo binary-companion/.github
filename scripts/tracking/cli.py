@@ -69,21 +69,29 @@ def run_rollup(api, repo: str, number: int) -> None:
         cur = parent
 
 
-def run_sweep_all(api) -> None:
-    """Every tracked repository: add open issues to its projects, roll parents up, file a CI bug."""
+def run_sweep_all(api) -> list[tuple[str, Exception]]:
+    """Every tracked repository: add open issues to its projects, roll parents up, file a CI bug.
+
+    One repository failing does not stop the others; the failures are returned for the caller to report.
+    """
+    failures: list[tuple[str, Exception]] = []
     for repo, tracking_text in api.tracked_repos().items():
         if not parse_tracking(tracking_text):
             continue
-        for number, closed, has_parent in api.scan(repo):
-            if not closed:
-                run_add(api, repo, number, tracking_text)
-            if has_parent:
-                run_rollup(api, repo, number)
-        failure = api.latest_failure(repo)
-        if failure:
-            sha, run_url, pr_number = failure
-            if not api.bug_exists(repo, sha):
-                run_ci_bug(api, repo, sha, run_url, pr_number)
+        try:
+            for number, closed, has_parent in api.scan(repo):
+                if not closed:
+                    run_add(api, repo, number, tracking_text)
+                if has_parent:
+                    run_rollup(api, repo, number)
+            failure = api.latest_failure(repo)
+            if failure:
+                sha, run_url, pr_number = failure
+                if not api.bug_exists(repo, sha):
+                    run_ci_bug(api, repo, sha, run_url, pr_number)
+        except Exception as error:  # noqa: BLE001 - isolate each repository
+            failures.append((repo, error))
+    return failures
 
 
 def run_ci_bug(api, repo: str, sha: str, run_url: str, pr_number: int | None) -> int:
@@ -117,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"::error::{message}")
             return 1
     else:
-        run_sweep_all(api)
+        failures = run_sweep_all(api)
+        for repo, error in failures:
+            print(f"::error::{repo}: {error}")
+        return 1 if failures else 0
     return 0
 
 

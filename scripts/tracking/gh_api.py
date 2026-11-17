@@ -117,9 +117,15 @@ class GH:
         streak, URL of the latest failing run, pull request of the first failing commit). None when it is green."""
         branch = subprocess.run(["gh", "api", f"repos/{repo}", "--jq", ".default_branch"],
                                 check=True, capture_output=True, text=True).stdout.strip()
-        runs = json.loads(subprocess.run(
+        done = subprocess.run(
             ["gh", "api", f"repos/{repo}/actions/runs?branch={branch}&event=push&status=completed&per_page=30"],
-            check=True, capture_output=True, text=True).stdout)["workflow_runs"]
+            check=False, capture_output=True, text=True)
+        if done.returncode != 0:
+            # The App cannot read this repository's Actions (private repository without the Actions permission,
+            # or Actions disabled): there is no CI history to check.
+            print(f"::notice::{repo}: CI runs not readable, skipping the CI check")
+            return None
+        runs = json.loads(done.stdout)["workflow_runs"]
         ci = [r for r in runs if r["name"] == "CI"]
         streak = []
         for r in ci:
