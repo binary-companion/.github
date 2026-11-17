@@ -19,6 +19,9 @@ class FakeAPI:
         self.added = []
         self.status_writes = []
         self.bugs = []
+        self.closed_issues = []
+        self.reopened_issues = []
+        self.fields = []
         self.open_with_parent = {}
 
     def resolve_project(self, ref):
@@ -48,7 +51,19 @@ class FakeAPI:
 
     def create_bug(self, repo, title, body):
         self.bugs.append((repo, title, body))
+        self.issues[(repo, 99)] = Issue("N99", repo, 99)
         return 99
+
+    def close_issue(self, issue):
+        self.closed_issues.append(issue.number)
+        issue.closed = True
+
+    def reopen_issue(self, issue):
+        self.reopened_issues.append(issue.number)
+        issue.closed = False
+
+    def set_issue_field(self, repo, number, field, value):
+        self.fields.append((repo, number, field, value))
 
 
 def issue(repo, n, status=None, project=TT, closed=False, parent=None, items=None):
@@ -202,7 +217,7 @@ class SweepAPI(FakeAPI):
 def test_sweep_all_skips_repos_without_a_tracking_list():
     from cli import run_sweep_all
     api = SweepAPI({"o/web": "", "o/a": "projects: [binary-companion/timetug]"},
-                   scans={"o/web": [(1, False, False)], "o/a": [(2, False, False)]},
+                   scans={"o/web": [(1, False, False, False)], "o/a": [(2, False, False, False)]},
                    issues=[issue("o/web", 1), issue("o/a", 2)])
     run_sweep_all(api)
     assert api.added == [("P_TT", 2)]
@@ -213,7 +228,7 @@ def test_sweep_all_rolls_up_parents_of_scanned_issues():
     parent = issue("o/a", 1, "Ready")
     child = issue("o/a", 2, "In progress", parent=("o/a", 1))
     api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
-                   scans={"o/a": [(2, False, True)]}, children={("o/a", 1): [("o/a", 2)]},
+                   scans={"o/a": [(2, False, True, False)]}, children={("o/a", 1): [("o/a", 2)]},
                    issues=[parent, child])
     run_sweep_all(api)
     assert ("I_P_TT_1", "In progress") in api.status_writes
@@ -246,7 +261,79 @@ def test_sweep_all_keeps_going_when_one_repository_fails_and_reports_it():
             return super().scan(repo)
 
     api = Flaky({"o/bad": "projects: [binary-companion/timetug]", "o/a": "projects: [binary-companion/timetug]"},
-                scans={"o/a": [(2, False, False)]}, issues=[issue("o/a", 2)])
+                scans={"o/a": [(2, False, False, False)]}, issues=[issue("o/a", 2)])
     failures = run_sweep_all(api)
     assert api.added == [("P_TT", 2)]
     assert [repo for repo, _ in failures] == ["o/bad"]
+
+
+def test_rollup_pulls_an_in_review_parent_back_when_a_child_is_not_in_review():
+    parent = issue("o/a", 1, "In review")
+    c1 = issue("o/a", 2, "In review", parent=("o/a", 1))
+    c2 = issue("o/a", 3, "Backlog", parent=("o/a", 1))
+    api = FakeAPI([parent, c1, c2], children={("o/a", 1): [("o/a", 2), ("o/a", 3)]})
+    run_rollup(api, "o/a", 3)
+    assert api.status_writes == [("I_P_TT_1", "In progress")]
+
+
+def test_rollup_closes_an_open_parent_when_every_child_is_closed():
+    parent = issue("o/a", 1, "In progress")
+    c1 = issue("o/a", 2, "Done", closed=True, parent=("o/a", 1))
+    c2 = issue("o/a", 3, "Done", closed=True, parent=("o/a", 1))
+    api = FakeAPI([parent, c1, c2], children={("o/a", 1): [("o/a", 2), ("o/a", 3)]})
+    run_rollup(api, "o/a", 3)
+    assert api.status_writes == [("I_P_TT_1", "Done")]
+    assert api.closed_issues == [1]
+
+
+def test_rollup_reopens_a_closed_parent_when_a_child_is_open():
+    parent = issue("o/a", 1, "Done", closed=True)
+    c1 = issue("o/a", 2, "Done", closed=True, parent=("o/a", 1))
+    c2 = issue("o/a", 3, "Backlog", parent=("o/a", 1))
+    api = FakeAPI([parent, c1, c2], children={("o/a", 1): [("o/a", 2), ("o/a", 3)]})
+    run_rollup(api, "o/a", 3)
+    assert api.reopened_issues == [1]
+
+
+def test_rollup_leaves_a_parent_open_while_a_child_is_open():
+    parent = issue("o/a", 1, "In progress")
+    c1 = issue("o/a", 2, "Done", closed=True, parent=("o/a", 1))
+    c2 = issue("o/a", 3, "In progress", parent=("o/a", 1))
+    api = FakeAPI([parent, c1, c2], children={("o/a", 1): [("o/a", 2), ("o/a", 3)]})
+    run_rollup(api, "o/a", 3)
+    assert api.closed_issues == [] and api.reopened_issues == []
+
+
+def test_add_marks_a_closed_issue_done_when_it_joins_a_project():
+    api = FakeAPI([issue("o/a", 1, closed=True)])
+    run_add(api, "o/a", 1, "projects: [binary-companion/timetug]", done=True)
+    assert api.added == [("P_TT", 1)]
+    assert api.status_writes == [("I_P_TT_1", "Done")]
+
+
+def test_sweep_all_adds_a_recently_completed_closed_issue_as_done_but_not_other_closed_ones():
+    from cli import run_sweep_all
+    api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
+                   scans={"o/a": [(1, True, False, True), (2, True, False, False)]},
+                   issues=[issue("o/a", 1, closed=True), issue("o/a", 2, closed=True)])
+    run_sweep_all(api)
+    assert api.added == [("P_TT", 1)]
+    assert api.status_writes == [("I_P_TT_1", "Done")]
+
+
+def test_ci_bug_is_ready_urgent_and_on_the_board():
+    api = FakeAPI([])
+    number = run_ci_bug(api, "o/a", "abc1234", "https://example/run/1", 12,
+                        tracking_text="projects: [binary-companion/timetug]")
+    assert number == 99
+    assert api.added == [("P_TT", 99)]
+    assert api.status_writes == [("I_P_TT_99", "Ready")]
+    assert api.fields == [("o/a", 99, "Priority", "Urgent")]
+
+
+def test_sweep_all_passes_the_repo_tracking_list_to_the_bug_filing():
+    from cli import run_sweep_all
+    api = SweepAPI({"o/a": "projects: [binary-companion/timetug]"},
+                   failures={"o/a": ("abcdef1234567", "https://example/run/9", None)}, issues=[])
+    run_sweep_all(api)
+    assert api.status_writes == [("I_P_TT_99", "Ready")]
