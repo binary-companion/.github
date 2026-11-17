@@ -1,0 +1,37 @@
+# The central sweeper. Every 15 minutes (and on demand) it visits every organization repository that has a
+# .github/tracking.yml and: adds open issues to the projects that file lists, rolls each parent's status up from
+# its children, and files a bug when CI on the default branch has gone red. The GitHub App key (org secret, visible
+# to this repository only) is used here and nowhere else, in the `tracking` environment (main branch only).
+# GitHub's built-in project workflows do the instant moves (closed, merged, linked, reopened).
+name: Sweep
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    environment: tracking
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r scripts/tracking/requirements-test.txt
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: binary-companion
+      - name: Sweep every tracked repository
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python scripts/tracking/cli.py sweep-all
