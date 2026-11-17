@@ -84,6 +84,26 @@ def run_rollup(api, repo: str, number: int) -> None:
         cur = parent
 
 
+def run_issue_event(api, repo: str, number: int, action: str, reason: str) -> None:
+    """React to one issue event at once: put the issue on its repository's projects (a completed one as Done),
+    keep its own status right, and bring every ancestor up to date. The sweep repeats this for anything missed."""
+    tracking_text = api.tracking_text(repo)
+    if not parse_tracking(tracking_text):
+        return
+    closed = action == "closed"
+    if closed and reason != "completed":
+        issue = api.issue(repo, number)  # dropped as not planned: never put on the board, but keep a card in step
+    else:
+        issue = run_add(api, repo, number, tracking_text, done=closed)
+    for item in issue.items:
+        if closed and item.status != DONE:
+            api.set_status(item, DONE)
+        elif action == "reopened" and item.status == DONE:
+            api.set_status(item, IN_PROGRESS)
+    if issue.parent:
+        run_rollup(api, repo, number)
+
+
 def run_sweep_all(api) -> list[tuple[str, Exception]]:
     """Every tracked repository: add issues to its projects (a recently completed one as Done), roll parents
     up, file a CI bug.
@@ -136,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("sweep-all")
+    e = sub.add_parser("issue-event")
+    e.add_argument("--repo", required=True)
+    e.add_argument("--number", type=int, required=True)
+    e.add_argument("--action", required=True)
+    e.add_argument("--reason", default="")
     s = sub.add_parser("pr-check")
     s.add_argument("--repo", required=True)
     s.add_argument("--pr", type=int, required=True)
@@ -143,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--author", required=True)
     a = p.parse_args(argv)
     api = GH()
-    if a.cmd == "pr-check":
+    if a.cmd == "issue-event":
+        run_issue_event(api, a.repo, a.number, a.action, a.reason)
+    elif a.cmd == "pr-check":
         ok, message = run_pr_check(api, a.repo, a.pr, a.body, a.author)
         if not ok:
             print(f"::error::{message}")
